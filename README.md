@@ -9,8 +9,6 @@ The model combines:
 - a dual-stream cascaded attention architecture for cell-drug interaction modeling
 - a global shortcut branch to preserve coarse cell and drug context
 
-This repository is the cleaned release version of the project, focused on the main training and inference path.
-
 ## Highlights
 
 - Two-stage training: VPM pretraining followed by end-to-end drug response classification
@@ -143,13 +141,6 @@ ACH-000002,DRUG_B,0
 More details are in [docs/data_format.md](docs/data_format.md).
 
 ## Release Scope
-
-This release intentionally removes most research-stage branches from the original monolithic script. It does not include:
-
-- fixed split-file workflow
-- experimental alternative drug encoders
-- focal loss, contrastive loss, pathway positional encoding, cosine attention, or MC dropout
-- large multi-mode export and analysis branches from the original exploratory code
 
 Public split controls retained:
 
