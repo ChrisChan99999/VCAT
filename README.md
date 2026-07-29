@@ -1,82 +1,113 @@
 # VCAT
 
-VCAT is an interpretable deep learning framework for cancer drug response prediction that integrates cellular functional vulnerabilities with drug-induced transcriptional perturbations.
+VCAT is a vulnerability-guided cascaded attention model for cancer drug
+response prediction. It combines baseline gene expression, CRISPR-derived
+cellular vulnerabilities, and drug transcriptional signatures in a
+dual-stream attention architecture.
 
-The model combines:
+This repository contains only the VCAT implementation and its supporting
+training, inference, explanation, split-generation, seed-sweep, and ablation
+utilities. Datasets, trained checkpoints, generated results, baseline models,
+and plotting code are not included.
 
-- consensus transcriptional signatures (CTS) derived from CMap LINCS perturbation profiles
-- a Vulnerability Prediction Module (VPM) pretrained to predict CRISPR-based dependency profiles from baseline expression
-- a dual-stream cascaded attention architecture for cell-drug interaction modeling
-- a global shortcut branch to preserve coarse cell and drug context
+## Installation
 
-## Highlights
-
-- Two-stage training: VPM pretraining followed by end-to-end drug response classification
-- Interpretable biological representation: vulnerability-aware cell features and perturbation-based drug features
-- CTS construction pipeline included
-- Lightweight explanation and batch prediction scripts included
-- Release configuration kept stable, with only `split_mode` and `balance_strategy` exposed by default
-
-## Quick Start
-
-Install dependencies:
+VCAT requires Python 3.10 or newer.
 
 ```bash
-pip install -r requirements.txt
-```
-
-Or install as a package:
-
-```bash
+python -m venv .venv
+source .venv/bin/activate
 pip install -e .
 ```
 
-Train a model:
+On Windows PowerShell, activate the environment with:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+## Input data
+
+Prepare separate expression, CRISPR, and drug-data directories. The required
+filenames and matrix orientations are documented in
+[`docs/data_format.md`](docs/data_format.md). Data are intentionally excluded
+from this repository.
+
+## Generate fixed splits
+
+The following command generates four split modes across ten seeds:
 
 ```bash
-python scripts/train.py \
-  --expression_dir /path/to/python_expression_data2 \
-  --crispr_dir /path/to/python_crispr_data2 \
+python scripts/generate_splits.py \
+  --expression_dir /path/to/expression \
+  --crispr_dir /path/to/crispr \
   --drugdata_dir /path/to/DrugData \
   --response_csv /path/to/DrugData/GDSC_response3TCS.csv \
   --gene_filter_csv /path/to/DrugData/expressiongenes2.csv \
-  --output_dir /path/to/output \
-  --split_mode leave_drug \
-  --balance_strategy undersample
+  --output_dir /path/to/DrugData/fixed_splits \
+  --base_seed 53 \
+  --num_seeds 10
 ```
 
-Main training artifacts:
+Supported split modes are `random`, `leave_cell`, `leave_drug`, and
+`double_cold`.
 
-- `vcat_model.pt`
-- `metrics.json`
-
-Run explanation for one cell-drug pair:
+## Train VCAT
 
 ```bash
-python scripts/explain.py \
-  --model_path /path/to/output/vcat_model.pt \
-  --expression_dir /path/to/python_expression_data2 \
-  --crispr_dir /path/to/python_crispr_data2 \
+python scripts/train.py \
+  --expression_dir /path/to/expression \
+  --crispr_dir /path/to/crispr \
   --drugdata_dir /path/to/DrugData \
-  --output_dir /path/to/explanations \
-  --cell ACH-000217 \
-  --drug SORAFENIB
+  --response_csv /path/to/DrugData/GDSC_response3TCS.csv \
+  --gene_filter_csv /path/to/DrugData/expressiongenes2.csv \
+  --split_file /path/to/DrugData/fixed_splits/fixed_split_leave_cell_seed53.csv.gz \
+  --split_mode leave_cell \
+  --drug_feature tcs \
+  --balance_strategy undersample \
+  --vpm_finetune_strategy unfreeze_all \
+  --output_dir /path/to/output
 ```
 
-Run batch prediction:
+Each completed run writes a `vcat_model.pt` checkpoint and `metrics.json`.
+See [`docs/reproduction.md`](docs/reproduction.md) for seed sweeps and Slurm
+usage.
+
+## Prediction and explanation
+
+Run predictions:
 
 ```bash
 python scripts/predict.py \
-  --model_path /path/to/output/vcat_model.pt \
-  --expression_dir /path/to/python_expression_data2 \
-  --crispr_dir /path/to/python_crispr_data2 \
+  --model_path /path/to/vcat_model.pt \
+  --expression_dir /path/to/expression \
+  --crispr_dir /path/to/crispr \
   --drugdata_dir /path/to/DrugData \
-  --cells ACH-000217 ACH-000221 \
-  --drugs SORAFENIB REGORAFENIB \
-  --output_csv /path/to/predictions.csv
+  --cells ACH-000001 ACH-000002 \
+  --drugs DRUG_A DRUG_B \
+  --output_csv predictions.csv
 ```
 
-Build CTS features from LINCS-derived H5 input:
+Generate a lightweight explanation for one cell-drug pair:
+
+```bash
+python scripts/explain.py \
+  --model_path /path/to/vcat_model.pt \
+  --expression_dir /path/to/expression \
+  --crispr_dir /path/to/crispr \
+  --drugdata_dir /path/to/DrugData \
+  --output_dir explanations \
+  --cell ACH-000001 \
+  --drug DRUG_A
+```
+
+The repository also includes embedding and Integrated Gradients exporters.
+Integrated Gradients usage is documented in
+[`docs/integrated_gradients.md`](docs/integrated_gradients.md).
+
+## CTS construction
+
+Build consensus transcriptional signatures from an H5 perturbation matrix:
 
 ```bash
 python scripts/build_cts.py \
@@ -87,114 +118,18 @@ python scripts/build_cts.py \
   --chunk_size 50
 ```
 
-## Repository Layout
+## Repository layout
 
 ```text
 VCAT/
-|-- src/vcat/
-|   |-- config.py
-|   |-- cts.py
-|   |-- data.py
-|   |-- datasets.py
-|   |-- inference.py
-|   |-- metrics.py
-|   |-- model.py
-|   |-- training.py
-|   `-- utils.py
-|-- scripts/
-|   |-- build_cts.py
-|   |-- explain.py
-|   |-- predict.py
-|   |-- submit_slurm.sh
-|   `-- train.py
-`-- docs/
+|-- src/vcat/                 # model, data handling, training, and inference
+|-- scripts/                  # VCAT command-line and Slurm workflows
+|-- docs/                     # data and reproducibility documentation
+|-- pyproject.toml
+|-- requirements.txt
+`-- LICENSE
 ```
-
-## Data Layout
-
-Expected inputs:
-
-```text
-expression_dir/
-|-- gene_expression.csv
-|-- cell_line_names.csv
-`-- gene_names.csv
-
-crispr_dir/
-|-- crispr_gene_effect.csv
-|-- cell_line_names.csv
-`-- gene_names.csv
-
-drugdata_dir/
-|-- drug_gene_matrix.level4.Mixed4.csv
-`-- expressiongenes2.csv
-```
-
-Response CSV:
-
-```text
-cell,drug,label
-ACH-000001,DRUG_A,1
-ACH-000002,DRUG_B,0
-```
-
-More details are in [docs/data_format.md](docs/data_format.md).
-
-## Release Scope
-
-Public split controls retained:
-
-- `split_mode`: `random`, `leave_cell`, `leave_drug`, `double_cold`
-- `balance_strategy`: `none`, `oversample`, `undersample`, `balanced`, `ratio_4_6`, `ratio_3_7`, `ratio_2_8`
-
-## Default Configuration
-
-The release code fixes the mainline configuration currently used in the project:
-
-- `d_model=256`
-- `num_heads=8`
-- `num_layers=2`
-- `encoder_layers=2`
-- `ffn_factor=4.0`
-- `dropout=0.2`
-- `batch_size=24`
-- `vpm_epochs=200`
-- `max_epochs=200`
-- `lr=1e-4`
-- `weight_decay=1e-3`
-- `label_smoothing=0.1`
-- `patience=20`
-- `max_genes=25000`
-- `cell_token_mode=fused`
-- `pooling=mean`
-- `invert_crispr=True`
-- `seed=53`
-
-## SLURM
-
-Submit training with:
-
-```bash
-sbatch scripts/submit_slurm.sh
-```
-
-Override split behavior if needed:
-
-```bash
-sbatch --export=ALL,SPLIT=leave_cell,BALANCE_STRATEGY=balanced scripts/submit_slurm.sh
-```
-
-## Method Summary
-
-The released implementation follows the core method described in the manuscript:
-
-- CTS generation at a reference dose of `10 uM` using a hierarchical meta-regression strategy
-- cell encoder pretraining on CRISPR dependency prediction
-- gated fusion of expression-derived and vulnerability-informed cell features
-- adaptive drug encoder with local and global perturbation branches
-- dual-stream cascaded attention for cell-drug interaction modeling
-- binary classification with BCE-with-logits and label smoothing
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+VCAT is released under the MIT License.

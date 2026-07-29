@@ -25,12 +25,33 @@ class SmoothedBCEWithLogitsLoss(nn.Module):
         return self.base_loss(logits, targets)
 
 
+def _enable_mc_dropout(model: nn.Module) -> None:
+    for module in model.modules():
+        if isinstance(module, nn.Dropout):
+            module.train()
+
+
+def _mc_dropout_probs(
+    model: VCATModel,
+    expression: torch.Tensor,
+    tcs: torch.Tensor,
+    num_passes: int,
+) -> torch.Tensor:
+    model.eval()
+    _enable_mc_dropout(model)
+    probabilities = []
+    for _ in range(num_passes):
+        probabilities.append(torch.sigmoid(model(expression, tcs).logits))
+    return torch.stack(probabilities, dim=0).mean(dim=0)
+
+
 def _evaluate_classifier(
     model: VCATModel,
     loader: DataLoader,
     device: str,
     criterion: nn.Module,
     threshold: Optional[float] = None,
+    mc_dropout_passes: int = 0,
 ) -> Tuple[Dict[str, float], float, float]:
     model.eval()
     all_targets: List[int] = []
@@ -42,10 +63,13 @@ def _evaluate_classifier(
             expression = expression.to(device)
             tcs = tcs.to(device)
             labels = labels.to(device)
-            output = model(expression, tcs)
-            logits = output.logits
+            if mc_dropout_passes > 0:
+                probs = _mc_dropout_probs(model, expression, tcs, mc_dropout_passes)
+                logits = torch.logit(probs.clamp(1e-7, 1.0 - 1e-7))
+            else:
+                logits = model(expression, tcs).logits
+                probs = torch.sigmoid(logits)
             loss = criterion(logits, labels)
-            probs = torch.sigmoid(logits)
             all_targets.extend(labels.detach().cpu().numpy().astype(int).tolist())
             all_scores.extend(probs.detach().cpu().numpy().tolist())
             total_loss += float(loss.item()) * labels.size(0)
@@ -113,11 +137,31 @@ def train_classifier(
 ) -> Tuple[Dict[str, float], float]:
     device = cfg.device
     model.to(device)
-    for parameter in model.cell_encoder.vpm.parameters():
-        parameter.requires_grad = False
+    strategy = cfg.vpm_finetune_strategy
+    if strategy not in {"frozen", "unfreeze_all", "unfreeze_after_warmup"}:
+        raise ValueError(f"Unsupported VPM fine-tune strategy: {strategy}")
+    if cfg.vpm_lr_multiplier <= 0:
+        raise ValueError("vpm_lr_multiplier must be greater than zero")
+    if strategy == "unfreeze_after_warmup" and not 0 < cfg.vpm_unfreeze_epoch < cfg.max_epochs:
+        raise ValueError("vpm_unfreeze_epoch must be between 1 and max_epochs - 1")
 
-    trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
-    optimizer = torch.optim.AdamW(trainable_parameters, lr=cfg.lr, weight_decay=cfg.weight_decay)
+    vpm_parameters = list(model.cell_encoder.vpm.parameters())
+    vpm_parameter_ids = {id(parameter) for parameter in vpm_parameters}
+    classifier_parameters = [parameter for parameter in model.parameters() if id(parameter) not in vpm_parameter_ids]
+
+    vpm_is_used = model.cell_encoder.fusion_mode != "expression_only"
+    vpm_trainable = strategy == "unfreeze_all" and vpm_is_used
+    for parameter in vpm_parameters:
+        parameter.requires_grad = vpm_trainable
+
+    if strategy == "frozen" or not vpm_is_used:
+        optimizer_parameters = classifier_parameters
+    else:
+        optimizer_parameters = [
+            {"params": classifier_parameters, "lr": cfg.lr},
+            {"params": vpm_parameters, "lr": cfg.lr * cfg.vpm_lr_multiplier},
+        ]
+    optimizer = torch.optim.AdamW(optimizer_parameters, lr=cfg.lr, weight_decay=cfg.weight_decay)
     criterion = SmoothedBCEWithLogitsLoss(cfg.label_smoothing)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max", factor=0.5, patience=2)
     best_state = None
@@ -125,8 +169,26 @@ def train_classifier(
     best_threshold = 0.5
     best_auroc = -1.0
     epochs_without_improvement = 0
+    if cfg.mc_dropout_passes > 0:
+        print(f"[CLS] MC dropout enabled: passes={cfg.mc_dropout_passes}")
+    print(
+        "[CLS] VPM fine-tune strategy: "
+        f"strategy={strategy} vpm_lr={cfg.lr * cfg.vpm_lr_multiplier:.3g} "
+        f"unfreeze_epoch={cfg.vpm_unfreeze_epoch}"
+    )
 
     for epoch in range(cfg.max_epochs):
+        if vpm_is_used and strategy == "unfreeze_after_warmup" and epoch == cfg.vpm_unfreeze_epoch:
+            for parameter in vpm_parameters:
+                parameter.requires_grad = True
+            best_state = None
+            best_metrics = None
+            best_auroc = -1.0
+            epochs_without_improvement = 0
+            print(
+                f"[CLS] unfroze VPM at epoch {epoch + 1}; "
+                f"lr={cfg.lr * cfg.vpm_lr_multiplier:.3g}"
+            )
         model.train()
         running_loss = 0.0
         sample_count = 0
@@ -143,7 +205,13 @@ def train_classifier(
             running_loss += float(loss.item()) * labels.size(0)
             sample_count += labels.size(0)
 
-        metrics, threshold, val_loss = _evaluate_classifier(model, val_loader, device, criterion)
+        metrics, threshold, val_loss = _evaluate_classifier(
+            model,
+            val_loader,
+            device,
+            criterion,
+            mc_dropout_passes=cfg.mc_dropout_passes,
+        )
         scheduler.step(metrics["auroc"])
         train_loss = running_loss / max(1, sample_count)
         print(
@@ -165,7 +233,12 @@ def train_classifier(
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
-        if epochs_without_improvement >= cfg.patience:
+        warmup_complete = (
+            not vpm_is_used
+            or strategy != "unfreeze_after_warmup"
+            or epoch + 1 > cfg.vpm_unfreeze_epoch
+        )
+        if warmup_complete and epochs_without_improvement >= cfg.patience:
             print(f"[CLS] early stop at epoch {epoch + 1}")
             break
 
@@ -181,7 +254,14 @@ def evaluate_test_set(
     threshold: float,
 ) -> Dict[str, float]:
     criterion = SmoothedBCEWithLogitsLoss(cfg.label_smoothing)
-    metrics, _, test_loss = _evaluate_classifier(model, test_loader, cfg.device, criterion, threshold=threshold)
+    metrics, _, test_loss = _evaluate_classifier(
+        model,
+        test_loader,
+        cfg.device,
+        criterion,
+        threshold=threshold,
+        mc_dropout_passes=cfg.mc_dropout_passes,
+    )
     metrics["loss"] = test_loss
     return metrics
 
@@ -191,25 +271,43 @@ def save_training_artifacts(
     model: VCATModel,
     cfg: VCATConfig,
     data_paths: DataPaths,
-    genes: Sequence[str],
+    genes_expr: Sequence[str],
+    genes_tcs: Sequence[str],
     cells: Sequence[str],
     drugs: Sequence[str],
     threshold: float,
     metrics: Dict[str, float],
-    scaler_mean: Sequence[float],
-    scaler_scale: Sequence[float],
+    expression_scaler_mean: Sequence[float],
+    expression_scaler_scale: Sequence[float],
+    crispr_scaler_mean: Sequence[float],
+    crispr_scaler_scale: Sequence[float],
+    tcs_scaler_mean: Optional[Sequence[float]] = None,
+    tcs_scaler_scale: Optional[Sequence[float]] = None,
+    smiles_char_to_idx: Optional[Dict[str, int]] = None,
 ) -> None:
     ensure_dir(output_dir)
     checkpoint = {
         "model_state": model.state_dict(),
         "config": cfg.to_dict(),
         "data_paths": asdict(data_paths),
-        "genes": list(genes),
+        "genes": list(genes_expr),
+        "genes_expr": list(genes_expr),
+        "genes_tcs": list(genes_tcs),
         "cells": list(cells),
         "drugs": list(drugs),
         "threshold": float(threshold),
-        "scaler_mean": list(map(float, scaler_mean)),
-        "scaler_scale": list(map(float, scaler_scale)),
+        "drug_feature": cfg.drug_feature,
+        "scaler_mean": list(map(float, expression_scaler_mean)),
+        "scaler_scale": list(map(float, expression_scaler_scale)),
+        "expression_scaler_mean": list(map(float, expression_scaler_mean)),
+        "expression_scaler_scale": list(map(float, expression_scaler_scale)),
+        "crispr_scaler_mean": list(map(float, crispr_scaler_mean)),
+        "crispr_scaler_scale": list(map(float, crispr_scaler_scale)),
     }
+    if tcs_scaler_mean is not None and tcs_scaler_scale is not None:
+        checkpoint["tcs_scaler_mean"] = list(map(float, tcs_scaler_mean))
+        checkpoint["tcs_scaler_scale"] = list(map(float, tcs_scaler_scale))
+    if smiles_char_to_idx is not None:
+        checkpoint["smiles_char_to_idx"] = {str(char): int(index) for char, index in smiles_char_to_idx.items()}
     torch.save(checkpoint, f"{output_dir}/vcat_model.pt")
     save_json(f"{output_dir}/metrics.json", metrics)

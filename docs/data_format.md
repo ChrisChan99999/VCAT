@@ -1,6 +1,9 @@
-# Data Format
+# Data format
 
-## Expression Directory
+VCAT expects three input locations plus a response table. Large data files are
+not included in the repository.
+
+## Expression directory
 
 Required files:
 
@@ -8,13 +11,10 @@ Required files:
 - `cell_line_names.csv`
 - `gene_names.csv`
 
-The release code expects `gene_expression.csv` to use:
+`gene_expression.csv` contains cell lines in rows and genes in columns. Its
+first column is treated as the row index.
 
-- rows: cell lines
-- columns: genes
-- first column: row index
-
-## CRISPR Directory
+## CRISPR directory
 
 Required files:
 
@@ -22,49 +22,45 @@ Required files:
 - `cell_line_names.csv`
 - `gene_names.csv`
 
-The matrix is aligned to expression by shared cell lines and shared genes.
+The CRISPR matrix is aligned to the expression matrix using shared cell-line
+and gene identifiers.
 
-## DrugData Directory
+## Drug-data directory
 
-Required files:
+For the main TCS workflow:
 
 - `drug_gene_matrix.level4.Mixed4.csv`
-- optional gene filter file such as `expressiongenes2.csv`
+- an optional gene filter such as `expressiongenes2.csv`
 
-The TCS file is expected to use:
+The first TCS column contains the drug identifier; the remaining columns
+contain gene-level transcriptional-signature features.
 
-- first column: drug identifier
-- remaining columns: gene-level TCS features
+For the optional SMILES representation, provide `Drug.SmilesTCS.csv` or pass
+another filename through `--smiles_csv`.
 
-## CTS H5 Input
+## Response CSV
 
-The CTS construction script expects an H5 file with at least:
+The first three columns are interpreted as cell, drug, and binary label:
+
+```csv
+cell,drug,label
+ACH-000001,DRUG_A,1
+ACH-000002,DRUG_B,0
+```
+
+Labels can be numeric `0`/`1` or recognized strings such as `R`, `S`,
+`RESISTANT`, `SENSITIVE`, `TRUE`, and `FALSE`.
+
+## CTS H5 input
+
+`scripts/build_cts.py` expects an H5 file containing at least:
 
 - `expr`
 - `gene_names`
 - `sample_names`
 
-Each `sample_name` should follow the convention:
+Each sample name follows:
 
 ```text
 drug_id:cell_line:dose
 ```
-
-Example:
-
-```text
-BRD-K12345678:A549:10
-```
-
-## Response CSV
-
-The first three columns are interpreted as:
-
-1. cell
-2. drug
-3. label
-
-Accepted labels:
-
-- numeric `0` and `1`
-- string values such as `R`, `S`, `RESISTANT`, `SENSITIVE`, `TRUE`, `FALSE`

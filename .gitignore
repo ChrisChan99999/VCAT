@@ -12,10 +12,25 @@ build/
 dist/
 *.egg-info/
 
-outputs/
+# Generated training artifacts
+outputs*/
 checkpoints/
 logs/
 wandb/
+*.pt
+*.pth
+*.ckpt
+*.joblib
+*.out
+*.err
 
+# Local datasets and fixed splits
+DrugData/
+python_expression_data*/
+python_crispr_data*/
+
+# IDE and operating-system files
+.idea/
+.vscode/
 .DS_Store
 Thumbs.db

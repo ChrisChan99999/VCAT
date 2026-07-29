@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import os
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -13,6 +14,33 @@ from .utils import canonicalize_name
 
 
 Pair = Tuple[int, int, int]
+
+
+class SmilesTokenizer:
+    def __init__(
+        self,
+        smiles_list: Optional[Sequence[str]] = None,
+        max_length: int = 128,
+        char_to_idx: Optional[Dict[str, int]] = None,
+    ) -> None:
+        self.pad_idx = 0
+        self.unk_idx = 1
+        self.max_length = max_length
+        if char_to_idx is not None:
+            self.char_to_idx = {str(char): int(index) for char, index in char_to_idx.items()}
+        else:
+            charset = sorted({char for smiles in (smiles_list or []) for char in str(smiles)})
+            self.char_to_idx = {char: index + 2 for index, char in enumerate(charset)}
+
+    @property
+    def vocab_size(self) -> int:
+        return max([self.unk_idx, *self.char_to_idx.values()]) + 1
+
+    def encode(self, smiles: str) -> np.ndarray:
+        encoded = np.full(self.max_length, self.pad_idx, dtype=np.int64)
+        for position, char in enumerate(str(smiles)[: self.max_length]):
+            encoded[position] = self.char_to_idx.get(char, self.unk_idx)
+        return encoded
 
 
 def _read_names_csv(path: str) -> List[str]:
@@ -95,6 +123,23 @@ def load_tcs_matrix(drugdata_dir: str, prefer: str) -> pd.DataFrame:
     return matrix
 
 
+def load_smiles_table(drugdata_dir: str, csv_name: str = "Drug.SmilesTCS.csv") -> pd.DataFrame:
+    csv_path = os.path.join(drugdata_dir, csv_name)
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(f"SMILES file not found: {csv_path}")
+    df = pd.read_csv(csv_path, low_memory=False)
+    if df.shape[1] < 2:
+        raise ValueError(f"SMILES file must contain drug ID and SMILES columns: {csv_path}")
+    result = pd.DataFrame(
+        {
+            "drug": df.iloc[:, 0].map(canonicalize_name),
+            "smiles": df.iloc[:, 1].astype(str).str.strip(),
+        }
+    )
+    result = result[(result["smiles"] != "") & (result["smiles"].str.lower() != "nan")]
+    return result.drop_duplicates("drug", keep="first").reset_index(drop=True)
+
+
 def load_gene_filter(path: str) -> Optional[List[str]]:
     if not path:
         return None
@@ -125,11 +170,122 @@ def align_tcs_to_genes(tcs_df: pd.DataFrame, genes: Sequence[str]) -> pd.DataFra
     return tcs_df.loc[:, matched_genes].copy()
 
 
-def standardize_expression(expr_df: pd.DataFrame) -> Tuple[pd.DataFrame, StandardScaler]:
+def standardize_matrix_from_rows(
+    matrix_df: pd.DataFrame,
+    fit_rows: Sequence[str],
+) -> Tuple[pd.DataFrame, StandardScaler]:
+    fit_index = list(dict.fromkeys(row for row in fit_rows if row in matrix_df.index))
+    if not fit_index:
+        raise ValueError("No training rows are available for standardization")
     scaler = StandardScaler(with_mean=True, with_std=True)
-    values = scaler.fit_transform(expr_df.values)
-    standardized = pd.DataFrame(values, index=expr_df.index, columns=expr_df.columns)
+    scaler.fit(matrix_df.loc[fit_index].values)
+    values = scaler.transform(matrix_df.values).astype(np.float32)
+    standardized = pd.DataFrame(values, index=matrix_df.index, columns=matrix_df.columns)
     return standardized, scaler
+
+
+def standardize_with_statistics(
+    matrix_df: pd.DataFrame,
+    mean: Sequence[float],
+    scale: Sequence[float],
+) -> pd.DataFrame:
+    mean_array = np.asarray(mean, dtype=np.float32)
+    scale_array = np.asarray(scale, dtype=np.float32)
+    if matrix_df.shape[1] != len(mean_array) or matrix_df.shape[1] != len(scale_array):
+        raise ValueError(
+            "Saved scaler dimension does not match matrix columns: "
+            f"matrix={matrix_df.shape[1]}, mean={len(mean_array)}, scale={len(scale_array)}"
+        )
+    safe_scale = np.where(scale_array == 0.0, 1.0, scale_array)
+    values = ((matrix_df.values.astype(np.float32) - mean_array) / safe_scale).astype(np.float32)
+    return pd.DataFrame(values, index=matrix_df.index, columns=matrix_df.columns)
+
+
+def standardize_expression(expr_df: pd.DataFrame) -> Tuple[pd.DataFrame, StandardScaler]:
+    return standardize_matrix_from_rows(expr_df, list(expr_df.index))
+
+
+def export_split_file(
+    out_path: str,
+    train_pairs: Sequence[Pair],
+    val_pairs: Sequence[Pair],
+    test_pairs: Sequence[Pair],
+    cells: Sequence[str],
+    drugs: Sequence[str],
+    meta: Optional[Dict[str, object]] = None,
+) -> None:
+    def rows(split: str, pairs: Sequence[Pair]):
+        for cell_idx, drug_idx, label in pairs:
+            yield {
+                "split": split,
+                "cell": canonicalize_name(cells[int(cell_idx)]),
+                "drug": canonicalize_name(drugs[int(drug_idx)]),
+                "label": int(label),
+            }
+
+    split_df = pd.DataFrame(
+        list(rows("train", train_pairs))
+        + list(rows("val", val_pairs))
+        + list(rows("test", test_pairs))
+    )
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    split_df.to_csv(out_path, index=False, compression="infer")
+    if meta is not None:
+        with open(out_path + ".meta.json", "w", encoding="utf-8") as handle:
+            json.dump(meta, handle, ensure_ascii=False, indent=2)
+
+
+def load_split_file(split_path: str) -> pd.DataFrame:
+    split_df = pd.read_csv(split_path, compression="infer")
+    required = {"split", "cell", "drug", "label"}
+    missing = required - set(split_df.columns)
+    if missing:
+        raise ValueError(f"split_file is missing columns: {sorted(missing)}")
+    split_df = split_df.copy()
+    split_df["split"] = split_df["split"].astype(str).str.strip().str.lower()
+    split_df["cell"] = split_df["cell"].map(canonicalize_name)
+    split_df["drug"] = split_df["drug"].map(canonicalize_name)
+    split_df["label"] = (pd.to_numeric(split_df["label"], errors="coerce").fillna(0.0) >= 0.5).astype(np.int64)
+    return split_df
+
+
+def pairs_from_split_df(
+    split_df: pd.DataFrame,
+    cells: Sequence[str],
+    drugs: Sequence[str],
+) -> Tuple[List[Pair], List[Pair], List[Pair], Dict[str, int], Dict[str, int], Dict[str, int]]:
+    cell_index = {canonicalize_name(cell): idx for idx, cell in enumerate(cells)}
+    drug_index = {canonicalize_name(drug): idx for idx, drug in enumerate(drugs)}
+    report = {
+        "total_rows": int(len(split_df)),
+        "kept_rows": 0,
+        "dropped_unknown_cells": 0,
+        "dropped_unknown_drugs": 0,
+        "dropped_unknown_split": 0,
+    }
+    train_pairs: List[Pair] = []
+    val_pairs: List[Pair] = []
+    test_pairs: List[Pair] = []
+
+    for split, cell, drug, label in split_df[["split", "cell", "drug", "label"]].itertuples(index=False, name=None):
+        if cell not in cell_index:
+            report["dropped_unknown_cells"] += 1
+            continue
+        if drug not in drug_index:
+            report["dropped_unknown_drugs"] += 1
+            continue
+        pair = (int(cell_index[cell]), int(drug_index[drug]), int(label))
+        if split == "train":
+            train_pairs.append(pair)
+        elif split == "val":
+            val_pairs.append(pair)
+        elif split == "test":
+            test_pairs.append(pair)
+        else:
+            report["dropped_unknown_split"] += 1
+
+    report["kept_rows"] = len(train_pairs) + len(val_pairs) + len(test_pairs)
+    return train_pairs, val_pairs, test_pairs, cell_index, drug_index, report
 
 
 def prepare_pairs(

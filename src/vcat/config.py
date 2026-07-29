@@ -14,10 +14,13 @@ class DataPaths:
     response_csv: str
     gene_filter_csv: str = ""
     tcs_csv_prefer: str = "drug_gene_matrix.level4.Mixed4.csv"
+    smiles_csv: str = "Drug.SmilesTCS.csv"
+    split_file: str = ""
 
 
 @dataclass
 class VCATConfig:
+    ablation: str = "full"
     d_model: int = 256
     num_heads: int = 8
     num_layers: int = 2
@@ -32,11 +35,20 @@ class VCATConfig:
     weight_decay: float = 1e-3
     patience: int = 20
     label_smoothing: float = 0.1
+    mc_dropout_passes: int = 10
+    vpm_finetune_strategy: str = "frozen"
+    vpm_lr_multiplier: float = 0.1
+    vpm_unfreeze_epoch: int = 20
     val_ratio: float = 0.1
     test_ratio: float = 0.1
     split_mode: str = "leave_drug"
     balance_strategy: str = "undersample"
     balance_splits: str = "all"
+    tcs_standardization: str = "train_drugs_only"
+    drug_feature: str = "tcs"
+    max_smiles_len: int = 128
+    smiles_embedding_dim: int = 128
+    smiles_gru_layers: int = 2
     max_samples: int = 150000
     cell_token_mode: str = "fused"
     pooling: str = "mean"
