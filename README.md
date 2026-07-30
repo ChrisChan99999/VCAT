@@ -5,10 +5,9 @@ response prediction. It combines baseline gene expression, CRISPR-derived
 cellular vulnerabilities, and drug transcriptional signatures in a
 dual-stream attention architecture.
 
-This repository contains only the VCAT implementation and its supporting
+This repository contains the VCAT implementation and its supporting
 training, inference, explanation, split-generation, seed-sweep, and ablation
-utilities. Datasets, trained checkpoints, generated results, baseline models,
-and plotting code are not included.
+utilities. 
 
 ## Installation
 
