@@ -72,50 +72,6 @@ Each completed run writes a `vcat_model.pt` checkpoint and `metrics.json`.
 See [`docs/reproduction.md`](docs/reproduction.md) for seed sweeps and Slurm
 usage.
 
-## Prediction and explanation
-
-Run predictions:
-
-```bash
-python scripts/predict.py \
-  --model_path /path/to/vcat_model.pt \
-  --expression_dir /path/to/expression \
-  --crispr_dir /path/to/crispr \
-  --drugdata_dir /path/to/DrugData \
-  --cells ACH-000001 ACH-000002 \
-  --drugs DRUG_A DRUG_B \
-  --output_csv predictions.csv
-```
-
-Generate a lightweight explanation for one cell-drug pair:
-
-```bash
-python scripts/explain.py \
-  --model_path /path/to/vcat_model.pt \
-  --expression_dir /path/to/expression \
-  --crispr_dir /path/to/crispr \
-  --drugdata_dir /path/to/DrugData \
-  --output_dir explanations \
-  --cell ACH-000001 \
-  --drug DRUG_A
-```
-
-The repository also includes embedding and Integrated Gradients exporters.
-Integrated Gradients usage is documented in
-[`docs/integrated_gradients.md`](docs/integrated_gradients.md).
-
-## CTS construction
-
-Build consensus transcriptional signatures from an H5 perturbation matrix:
-
-```bash
-python scripts/build_cts.py \
-  --h5_file /path/to/expr_matrixTCS.h5 \
-  --output_prefix /path/to/output/drug_consensus_features \
-  --ref_dose 10.0 \
-  --n_jobs 8 \
-  --chunk_size 50
-```
 
 ## Repository layout
 
